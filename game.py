@@ -1,4 +1,4 @@
-from math import exp
+from math import exp, log
 from random import random, randint, shuffle, choice
 
 import matplotlib.pyplot as plt
@@ -209,7 +209,6 @@ class Board:
                     spot.paths[key] = path
                     spot2.paths[key] = path
             items.pop(0)
-        plt.scatter([x.a for x in self.paths.values()], [x.b for x in self.paths.values()])
         assert len(self.paths) == 72, len(self.paths)
 
         for spot in self.spots.values():
@@ -270,14 +269,13 @@ class Board:
             restricted_paths = []
             for _, path in self.paths:
                 # fix harbors so that they are not next to each other
-                if path.harbor != "N/A":
-                    if path.harbor is not None and path.harbor != "N/A":
-                        restricted_paths.append(path)
-                        for path2 in path.neighbors.values():
-                            restricted_paths.append(path2)
-                            if path2.harbor is not None and path2.harbor != "N/A":
-                                last_harbors.append(path2.harbor)
-                                path2.harbor = None
+                if path.harbor and path.harbor != "N/A":
+                    restricted_paths.append(path)
+                    for path2 in path.neighbors.values():
+                        restricted_paths.append(path2)
+                        if path2.harbor and path2.harbor != "N/A":
+                            last_harbors.append(path2.harbor)
+                            path2.harbor = None
             if not last_harbors:
                 break
             shuffle(self.paths)
@@ -292,10 +290,15 @@ class Board:
 
         self.turn = -1
 
-        self.agent_with_longest_road = None
-        self.agent_with_largest_army = None
+        self.agent_with_longest_road = self.agent_with_largest_army = self.agent_with_most_harbors = None
 
-        self.plot()
+        self.prev_density = None
+        self.density = 1
+        self.growth = 0
+
+        self.supply = 5
+
+        # self.plot()
 
     def add_agent(self, agent):
         self.agents.append(agent)
@@ -326,6 +329,28 @@ class Board:
                 self.agent_with_largest_army[0].victory_points += 2
         return largest_army
 
+    def most_harbors(self):
+        most_harbors = [agent.most_harbors() for agent in self.agents]
+        most_harbor = max(most_harbors)
+        if most_harbor >= 3:
+            if self.agent_with_most_harbors is None:
+                self.agent_with_most_harbors = (self.agents[argmax(most_harbors)], most_harbor)
+                self.agent_with_most_harbors[0].victory_points += 2
+            elif self.agent_with_most_harbors[1] < most_harbor:
+                self.agent_with_most_harbors[0].victory_points -= 2
+                self.agent_with_most_harbors = (self.agents[argmax(most_harbors)], most_harbor)
+                self.agent_with_most_harbors[0].victory_points += 2
+        return most_harbor
+
+    def get_growth(self):
+        self.prev_density = self.density
+        self.density = 25 - len(self.dev_cards)
+        for agent in self.agents:
+            self.density += 24 - (agent.settlements + agent.cities + agent.roads)
+        self.density /= 25 + 24 * len(self.agents)
+        self.growth = 0.75 * self.growth + 0.25 * self.density
+        return self.growth
+
     def plot(self):
         plt.figure(figsize=(5, 5))
         harbor_colors = {"ore": "lavender", "brick": "firebrick", "wheat": "lemonchiffon", "lumber": "olive",
@@ -341,9 +366,9 @@ class Board:
                     plt.plot([spot.a, path.a], [spot.b, path.b], color=path.owner)
                 for path in spot.paths.values():
                     plt.scatter(path.a, path.b, color=harbor_colors[path.harbor], marker="H",
-                                s=50 if (path.harbor is not None) and (path.harbor != "N/A") else 0)
+                                s=50 if path.harbor and (path.harbor != "N/A") else 0)
                     plt.text(path.a, path.b, path.harbor, ha="left", va="bottom",
-                             fontsize=10 if (path.harbor is not None) and (path.harbor != "N/A") else 0)
+                             fontsize=10 if path.harbor and (path.harbor != "N/A") else 0)
             if tile.robber:
                 plt.text(tile.a, tile.b, "*", ha="left", va="bottom", fontsize=10)
         plt.show()
@@ -360,6 +385,7 @@ class Agent:
         self.settlements = 5
         self.cities = 4
         self.dev_cards = {"knight": 0, "victory_point": 0, "monopoly": 0, "road_building": 0, "year_of_plenty": 0}
+        self.knights = 0
         self.victory_points = 0
         self.board.add_agent(self)
 
@@ -370,6 +396,11 @@ class Agent:
                  (any([self.board.paths[path2].owner == self.name for path2 in path.neighbors]) or
                   any([self.board.spots[spot].owner == self.name for spot in path.spots]))
                  and path.owner == UNOWNED]
+        for path in paths:
+            for spot in path.spots:
+                if self.board.spots[spot].build_level > 0 and self.board.spots[spot].owner != self.name:
+                    paths.remove(path)
+                    break
         return paths
 
     def available_spots_for_settlement(self):
@@ -387,6 +418,12 @@ class Agent:
     def choose_tile_to_occupy(self):
         tiles = [tile for tile in self.board.tiles
                  if all(spot.owner != self.name for spot in tile.spots.values()) and not tile.robber]
+        ideal_tiles = [tile for tile in tiles if any(spot.owner != UNOWNED for spot in tile.spots.values())]
+        if ideal_tiles:
+            tiles = ideal_tiles
+        ideal_tiles = [tile for tile in tiles if tile.die in [6, 8]]
+        if ideal_tiles:
+            tiles = ideal_tiles
         shuffle(tiles)
         return tiles[argmax([tile.probability for tile in tiles])]
 
@@ -407,16 +444,34 @@ class Agent:
                              any(all(self.board.spots[name].owner == UNOWNED for name in path2.spots) for path2 in
                                  path.neighbors.values())]
             if optimal_paths:
-                return choice(optimal_paths)
-            return choice(paths)
+                paths = optimal_paths
+            optimal_paths = []
+            length = self.longest_road()
+            for path in paths:
+                if path.owner == UNOWNED:
+                    owner = path.owner
+                    path.owner = self.name
+                    if self.longest_road() > length:
+                        optimal_paths.append(path)
+                    path.owner = owner
+                if optimal_paths:
+                    paths = optimal_paths
+                return choice(paths)
         return None
+
+    def total_production(self):
+        return sum(spot.build_level * tile.probability for spot in self.board.spots.values()
+                   if spot.owner == self.name for tile in spot.tiles)
 
     def choose_spot_to_build(self):
         spots = self.available_spots_for_settlement()
         if spots:
             shuffle(spots)
-            return spots[
-                argmax([sum(tile.probability for tile in spot.tiles) for spot in spots])]
+            ttl_prod = self.total_production()
+            return spots[argmax([sum(tile.probability for tile in spot.tiles) +
+                                 self.most_harbors() * ttl_prod * any(
+                path.harbor and path.harbor != "N/A" for path in spot.paths.values())
+                                 for spot in spots])]
         return None
 
     def choose_spot_to_upgrade(self):
@@ -451,9 +506,7 @@ class Agent:
             self.resources[resource] += 1
             print(f"{self.name} stole a {resource} from {person.name}!")
             return True
-        else:
-            print("You cannot steal from anyone!")
-            return False
+        return False
 
     def move_robber(self):  # stealing disabled for the sake of simplicity
         tile = self.choose_tile_to_occupy()
@@ -465,8 +518,7 @@ class Agent:
             self.steal(tile)
             return True
         else:
-            print("You must move the robber!")
-            return False
+            assert False, "Robber cannot be moved to the same tile!"
 
     def roll(self):
         dice = [randint(1, 6), randint(1, 6)]
@@ -551,7 +603,7 @@ class Agent:
             self.dev_cards[card] -= 1
             if card == "knight":
                 self.move_robber()
-                self.dev_cards["knight"] += 1
+                self.knights += 1
             elif card == "monopoly":
                 resource = self.choose_resource()
                 for agent in self.board.agents:
@@ -597,18 +649,25 @@ class Agent:
 
     def do_actions(self):
         self.build_settlement()
-        if random() < exp((1 - self.longest_road()) / 5):
+        growth = self.board.get_growth()
+        if random() < 1 - growth:
             self.build_road()
         self.build_city()
-        if random() < 0.5:
+        if random() < growth:
             self.buy_dev_card()
-        if random() < 0.5:
+        supply = sum([sum(agent.resources.values()) for agent in self.board.agents if agent.name != self.name])
+        inflation = 1 - exp(-supply / self.board.supply) / (log(self.board.turn) + self.largest_army() + 1)
+        self.board.supply = 0.75 * self.board.supply + 0.25 * supply
+        print(growth, inflation)
+        if random() < inflation:
             self.play_dev_card()
 
     def longest_road_helper(self, path, length):
         longest = length
         for neighbor in path.neighbors.values():
-            if neighbor.owner == self.name and not neighbor.visited:
+            name = set(neighbor.spots).difference(path.spots).pop()
+            if neighbor.owner == self.name and not neighbor.visited and (
+                    not self.board.spots[name].build_level or self.board.spots[name].owner == self.name):
                 neighbor.visited = True
                 longest = max(longest, self.longest_road_helper(neighbor, length + 1))
                 neighbor.visited = False
@@ -623,8 +682,12 @@ class Agent:
                 path.visited = False
         return longest
 
+    def most_harbors(self):
+        return len([path for path in self.board.paths.values()
+                    if path.owner == self.name and path.harbor and path.harbor != "N/A"])
+
     def largest_army(self):
-        return sum([self.dev_cards["knight"] for agent in self.board.agents if agent.name == self.name])
+        return sum([self.knights for agent in self.board.agents if agent.name == self.name])
 
     def __str__(self):
         return self.name + "\n\tvictory points: " + str(self.victory_points) + " " + str(self.resources)

@@ -1,8 +1,8 @@
 from random import random, randint, shuffle, choice
 
 import matplotlib.pyplot as plt
-from numpy import argmax, array, concatenate, mean
-from numpy.random import rand, choice as np_choice
+from numpy import argmax, mean
+from numpy.random import choice as np_choice
 from sympy import cos, pi, sin
 
 UNOWNED = "lightgray"
@@ -87,7 +87,7 @@ class Spot:  # there are 54 spots on the board
 class Path:  # there are 72 paths on the board
     def __init__(self, key, harbor):
         self.a, self.b = key
-        self.spots = {}
+        self.spots = None
         self.neighbors = {}
         self.harbor = harbor
         self.build_level = 0
@@ -111,8 +111,7 @@ class Path:  # there are 72 paths on the board
 
 
 class Board:
-    def __init__(self, agent):
-        self.agent = agent
+    def __init__(self):
         terrain_types = ["ore", "brick"] * 3 + ["wheat", "lumber", "sheep"] * 4
         dice = [2, 3, 3, 4, 4, 5, 5, 6, 6, 8, 8, 9, 9, 10, 10, 11, 11, 12]
         shuffle(terrain_types)
@@ -298,6 +297,8 @@ class Board:
 
         self.final_turn = None
 
+        self.prev_state = None
+
         # self.plot()
 
     def longest_road(self):
@@ -339,8 +340,8 @@ class Board:
                 self.player_with_most_harbors[0].victory_points += 2
         return most_harbor
 
-    def setup(self):
-        self.players = [Player(name, self) for name in ["red", "green", "blue", "yellow"]]
+    def setup(self, agent):
+        self.players = [Player(name, self, agent) for name in ["red", "green", "blue", "yellow"]]
         for player in self.players:
             player.build_settlement()
             player.build_road()
@@ -350,72 +351,36 @@ class Board:
             player.build_road()  # pretend you can put two roads on one settlement
         self.turn += 1
 
-    def get_current_player(self):
-        return self.players[self.turn % len(self.players)]
-
-    def points_per_category(self):
-        metrics = []
-        skip = self.turn % len(self.players)
-
-        for i in range(len(self.players)):
-            i = (i + skip) % len(self.players)
-            player = self.players[i]
-            metrics.append([player.longest_road(), player.largest_army(), player.most_harbors(),
-                            5 - player.settlements, 15 - player.roads, 4 - player.cities, player.total_production()])
-            metrics[-1].extend(player.dev_cards.values())
-            metrics[-1].extend(player.resources.values())
-        metrics = array(metrics).T
-        metrics /= metrics.max(axis=1, keepdims=True)
-        return metrics.flatten()
-
-    def get_state(self):
-        x = []
-        for player in self.players:
-            x.append(player.get_state())
-        return x
-
-    def get_reward(self):
-        x = []
-        for player in self.players:
-            x.append(player.get_reward())
-        return x
-
-    def get_action(self):
-        x = []
-        for player in self.players:
-            x.append(player.get_action())
-        return x
-
-    def move(self, action):
-        player = self.get_current_player()
-        player.roll()
-        player.move(action)
-        self.longest_road()
-        self.largest_army()
-        self.most_harbors()
-
     def play(self):
         while not self.is_game_over:
+            stop = 0
             for player in self.players:
+                stop += 1
+                player.roll()
                 player.states.append(player.get_state())
-                player.actions.append(player.get_action())
+                player.move(player.agent.get_action(player.states[-1]))
                 player.prev_victory_points = player.victory_points
-                player.prev_total_production = player.total_production()
-                self.move(player.actions[-1])
+                self.longest_road()
+                self.largest_army()
+                self.most_harbors()
                 self.is_game_over = player.victory_points >= 11
                 if self.is_game_over:
                     self.winner = player
                     player.won = True
                     self.final_turn = self.turn
                     break
+                stop = stop % len(self.players)
             for player in self.players:
+                if not stop:
+                    break
                 player.rewards.append(player.get_reward())
+                stop -= 1
             self.turn += 1
-        print(self.winner.name, self.turn)
+            print(f"Turn {self.turn} complete, {[player.victory_points for player in self.players]}")
         self.plot()
         return [state for player in self.players for state in player.states], \
-                [action for player in self.players for action in player.actions], \
-                [reward for player in self.players for reward in player.rewards]
+            [action for player in self.players for action in player.actions], \
+            [reward for player in self.players for reward in player.rewards]
 
     def plot(self):
         plt.figure(figsize=(5, 5))
@@ -438,14 +403,23 @@ class Board:
             if tile.robber:
                 plt.text(tile.a, tile.b, "*", ha="left", va="bottom", fontsize=10)
         plt.axis("off")
-        textstr = "\n".join([f"{player.name}: {player.victory_points}" for player in self.players]) + "\n" + f"{self.turn}"
+        textstr = "\n".join(
+            [f"{player.name}: {player.victory_points}" for player in self.players]) + "\n" + f"{self.turn}"
         props = dict(boxstyle="round", facecolor="wheat", alpha=0.5)
         plt.text(0.05, 0.95, textstr, transform=plt.gca().transAxes, fontsize=9, verticalalignment='top', bbox=props)
         plt.show()
 
 
+def idealize(choices, ideal):
+    ideal_choices = [c for c in choices if ideal(c)]
+    if ideal_choices:
+        return ideal_choices
+    return choices
+
+
 class Player:
-    def __init__(self, name, board):
+    def __init__(self, name, board, agent):
+        self.agent = agent
         self.won = False
         self.name = name
         self.board = board
@@ -456,15 +430,12 @@ class Player:
         self.dev_cards = {"knight": 0, "victory_point": 0, "monopoly": 0, "road_building": 0, "year_of_plenty": 0}
         self.knights = 0
         self.prev_victory_points = 0
-        self.prev_total_production = 0
         self.victory_points = 0
         self.states = []
         self.actions = []
         self.rewards = []
 
     def available_paths(self):
-        if not (self.roads and ((self.resources["brick"] and self.resources["lumber"]) or self.board.turn <= 0)):
-            return []
         paths = [path for name, path in self.board.paths.items() if
                  (any([self.board.paths[path2].owner == self.name for path2 in path.neighbors]) or
                   any([self.board.spots[spot].owner == self.name for spot in path.spots]))
@@ -477,9 +448,6 @@ class Player:
         return paths
 
     def available_spots_for_settlement(self):
-        if not (self.settlements and ((self.resources["brick"] and self.resources["lumber"] and
-                                       self.resources["wheat"] and self.resources["sheep"]) or self.board.turn <= 0)):
-            return []
         spots = []
         for _, spot in self.board.spots.items():
             if spot.build_level == 0 and \
@@ -488,15 +456,20 @@ class Player:
                 spots.append(spot)
         return spots
 
+    def available_spots_for_city(self):
+        spots = []
+        for _, spot in self.board.spots.items():
+            if spot.build_level == 1 and spot.owner == self.name:
+                spots.append(spot)
+        return spots
+
     def choose_tile_to_occupy(self):
-        tiles = [tile for tile in self.board.tiles
-                 if all(spot.owner != self.name for spot in tile.spots.values()) and not tile.robber]
-        ideal_tiles = [tile for tile in tiles if any(spot.owner != UNOWNED for spot in tile.spots.values())]
-        if ideal_tiles:
-            tiles = ideal_tiles
-        ideal_tiles = [tile for tile in tiles if tile.die in [6, 8]]
-        if ideal_tiles:
-            tiles = ideal_tiles
+        most_vp = self.board.players[argmax([player.victory_points for player in self.board.players])]
+        tiles = idealize([tile for tile in self.board.tiles if not tile.robber],
+                         lambda tile: all(spot.owner != self.name for spot in tile.spots.values()))
+        tiles = idealize(tiles, lambda tile: any(spot.owner != UNOWNED for spot in tile.spots.values()))
+        tiles = idealize(tiles, lambda tile: tile.die in [6, 8] or
+                                             any(spot.owner == most_vp.name for spot in tile.spots.values()))
         shuffle(tiles)
         return tiles[argmax([tile.probability for tile in tiles])]
 
@@ -510,14 +483,14 @@ class Player:
             resources.remove(choice(resources))
 
     def choose_path_to_build(self):
+        if not (self.roads and ((self.resources["brick"] and self.resources["lumber"]) or self.board.turn <= 0)):
+            return
         paths = self.available_paths()
         if paths:
-            optimal_paths = [path for path in paths if
-                             all(spot.owner in UNOWNED for spot in [self.board.spots[name] for name in path.spots]) and
-                             any(all(self.board.spots[name].owner == UNOWNED for name in path2.spots) for path2 in
-                                 path.neighbors.values())]
-            if optimal_paths:
-                paths = optimal_paths
+            ideal = lambda path: (all(spot.owner in UNOWNED for spot in [self.board.spots[name] for name in path.spots])
+                                  and any(all(self.board.spots[name].owner == UNOWNED for name in path2.spots) for path2
+                                          in path.neighbors.values()))
+            paths = idealize(paths, ideal)
             optimal_paths = []
             length = self.longest_road()
             for path in paths:
@@ -530,37 +503,35 @@ class Player:
                 if optimal_paths:
                     paths = optimal_paths
                 return choice(paths)
-        return None
 
     def total_production(self):
         return sum(spot.build_level * tile.probability for spot in self.board.spots.values()
                    if spot.owner == self.name for tile in spot.tiles)
 
     def choose_spot_to_build(self):
+        if not (self.settlements and ((self.resources["brick"] and self.resources["lumber"] and
+                                       self.resources["wheat"] and self.resources["sheep"]) or self.board.turn <= 0)):
+            return
         spots = self.available_spots_for_settlement()
         if spots:
             shuffle(spots)
-            ttl_prod = self.total_production()
+            ttl_prod = self.most_harbors() * self.total_production()
             return spots[argmax([sum(tile.probability for tile in spot.tiles) +
-                                 self.most_harbors() * ttl_prod * any(
+                                 ttl_prod * any(
                 path.harbor and path.harbor != "N/A" for path in spot.paths.values())
                                  for spot in spots])]
-        return None
 
     def choose_spot_to_upgrade(self):
-        spots = [spot for spot in self.board.spots.values() if spot.build_level == 1
-                 and spot.owner == self.name and (
-                         self.resources["wheat"] > 1 and self.resources["ore"] > 2)
-                 and self.cities > 0 and spot.build_level == 1]
+        if not (self.cities and self.resources["ore"] >= 3 and self.resources["wheat"]):
+            return
+        spots = self.available_spots_for_city()
         if spots:
             return choice(spots)
-        return None
 
     def choose_dev_card(self):
         cards = [card for card in self.dev_cards if self.dev_cards[card] > 0 and card != "victory_point"]
         if cards:
             return choice(cards)
-        return None
 
     def choose_person_to_steal_from(self, tile):
         people = [player for player in self.board.players if
@@ -569,15 +540,17 @@ class Player:
         try:
             return choice(people)
         except IndexError:
-            return None
+            return
 
     def steal(self, tile):
         person = self.choose_person_to_steal_from(tile)
         if person:
-            resource = choice(flatten_counts(person.resources))
-            person.resources[resource] -= 1
-            self.resources[resource] += 1
-            return True
+            resources = flatten_counts(person.resources)
+            if resources:
+                resource = choice(resources)
+                person.resources[resource] -= 1
+                self.resources[resource] += 1
+                return True
         return False
 
     def move_robber(self):  # stealing disabled for the sake of simplicity
@@ -640,7 +613,7 @@ class Player:
 
     def build_city(self):
         spot = self.choose_spot_to_upgrade()
-        if not spot:
+        if spot is None:
             return False
         self.cities -= 1
         self.settlements += 1
@@ -735,46 +708,50 @@ class Player:
         return longest
 
     def most_harbors(self):
-        return len([path for path in self.board.paths.values()
-                    if path.owner == self.name and path.harbor and path.harbor != "N/A"])
+        return sum([sum(self.board.spots[spot].build_level for spot in path.spots) for path in self.board.paths.values()
+                    if (path.owner == self.name) and path.harbor and (path.harbor != "N/A")])
 
     def largest_army(self):
         return sum([self.knights for player in self.board.players if player.name == self.name])
 
     def move(self, distribution):
-        for _ in range(10):
-            instruction = np_choice(len(distribution), p=0.1 / len(distribution) + 0.9 * distribution)
-            if instruction == 0:
-                self.build_road()
-            elif instruction == 1:
-                self.build_settlement()
-            elif instruction == 2:
-                self.build_city()
-            elif instruction == 3:
-                self.buy_dev_card()
-            elif instruction == 4:
-                self.play_dev_card()
-            elif instruction == 5:
-                self.consolidate()
-            else:
-                raise ValueError("Invalid instruction: {}".format(instruction))
+        instruction = np_choice(len(distribution), p=0.05 / len(distribution) + 0.95 * distribution)
+        if instruction == 0:
+            self.build_road()
+        elif instruction == 1:
+            self.build_settlement()
+        elif instruction == 2:
+            self.build_city()
+        elif instruction == 3:
+            self.buy_dev_card()
+        elif instruction == 4:
+            self.play_dev_card()
+        elif instruction == 5:
+            self.consolidate()
+        else:
+            raise ValueError("Invalid instruction: {}".format(instruction))
+        self.actions.append(instruction)
+
+    def get_self_state(self):
+        x = [self.knights, self.longest_road(), self.most_harbors(), self.largest_army()] + \
+            [self.resources[resource] for resource in self.resources] + \
+            [self.settlements, self.cities, self.roads] + \
+            [len(self.available_spots_for_settlement()), len(self.available_spots_for_city()),
+             len(self.available_paths())]
+        expected = [tile.probability * sum(spot.build_level for spot in tile.spots.values() if spot.owner == self.name)
+                    for tile in self.board.tiles]
+        for resource in ["brick", "lumber", "sheep", "wheat", "ore"]:
+            x.append(sum(expected[i] for i in range(19) if self.board.tiles[i].terrain_type == resource))
+        return x + [self.dev_cards[card] for card in self.dev_cards]
 
     def get_state(self):
-        return self.board.points_per_category()
-
-    def get_action(self):
-        action = self.board.agent.get_action(self.board.points_per_category())
-        return action
+        mean_state = mean([player.get_self_state() for player in self.board.players], axis=0).tolist()
+        return self.get_self_state() + mean_state[:-5] + [sum(mean_state[-5:])]
 
     def get_reward(self):
-        return (2 * self.total_production() -
-                2 * self.prev_total_production -
-                mean([player.total_production() for player in self.board.players]) +
-                mean([player.prev_total_production for player in self.board.players]) +
-                2 * self.victory_points -
-                2 * self.prev_victory_points -
-                mean([player.victory_points for player in self.board.players]) +
-                mean([player.prev_victory_points for player in self.board.players]) + 100 * self.won)
+        improvement_time = self.victory_points - self.prev_victory_points > 0
+        relative_performant = self.victory_points - max([player.victory_points for player in self.board.players]) == 0
+        return 1 if improvement_time or relative_performant else -1
 
     def __str__(self):
         return self.name + "\n\tvictory points: " + str(self.victory_points) + " " + str(self.resources)

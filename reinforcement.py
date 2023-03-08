@@ -29,10 +29,8 @@ class Network(nn.Module):
         super().__init__()
 
         self.fc1 = nn.Linear(input_size, 128)
-        self.fc2 = nn.Linear(128, 256)
-        self.fc3 = nn.Linear(256, 256)
-        self.fc4 = nn.Linear(256, 128)
-        self.fc5 = nn.Linear(128, output_size)
+        self.fc2 = nn.Linear(128, 128)
+        self.fc3 = nn.Linear(128, output_size)
 
     def forward(self, x):
         """
@@ -43,9 +41,7 @@ class Network(nn.Module):
         """
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
-        x = F.relu(self.fc3(x))
-        x = F.relu(self.fc4(x))
-        x = nn.Softmax(dim=0)(self.fc5(x))
+        x = nn.Softmax(dim=0)(self.fc3(x))
 
         return x
 
@@ -62,11 +58,11 @@ class ReinforcementAgent:
     for dying. The agent then uses the reward and penalty to update the weights of the neural network.
     """
 
-    def __init__(self, num_players=4):
+    def __init__(self):
         """
         Initializes the agent with a neural network.
         """
-        self.network = Network(17 * num_players, 6).to(device)
+        self.network = Network(46, 6).to(device)
         self.optimizer = optim.NAdam(self.network.parameters(), lr=1e-4)
         self.loss_function = nn.CrossEntropyLoss(label_smoothing=0.1)
         self.losses = []
@@ -93,6 +89,7 @@ class ReinforcementAgent:
         :param states: The states the agent was in when it took the actions.
         :param actions: The actions the agent took.
         :param rewards: The rewards the agent received for taking the actions.
+        :param final_turn: The turn the game ended on.
         """
         states = torch.stack([torch.tensor(state).to(torch.float32).to(device) for state in states])
         actions = torch.stack([torch.tensor(action).to(torch.long).to(device) for action in actions])
@@ -138,15 +135,15 @@ def main():
     for epoch in range(1000):
         ARGS = [[], [], []]
         final_turns = []
-        for _ in range(3):
-            game = catan.Board(agent)
-            game.setup()
+        for _ in range(5):
+            game = catan.Board()
+            game.setup(agent)
             states, actions, rewards = game.play()
             ARGS[0].extend(states)
             ARGS[1].extend(actions)
             ARGS[2].extend(rewards)
             final_turns.append(game.final_turn)
-        agent.train(*ARGS, sum(final_turns) / 3)
+        agent.train(*ARGS, sum(final_turns) / 5)
         agent.plot()
         print(f"Epoch: {epoch}")
 
